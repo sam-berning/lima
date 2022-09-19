@@ -24,6 +24,7 @@ declare -A CHECKS=(
 	["restart"]="1"
 	["port-forwards"]="1"
 	["vmnet"]=""
+	["disk"]=""
 )
 
 case "$NAME" in
@@ -45,6 +46,9 @@ case "$NAME" in
 "vmnet")
 	CHECKS["vmnet"]=1
 	;;
+"disk")
+	CHECKS["disk"]=1
+	;;
 esac
 
 if limactl ls -q | grep -q "$NAME"; then
@@ -62,6 +66,13 @@ if [[ -n ${CHECKS["port-forwards"]} ]]; then
 	INFO "Setup port forwarding rules for testing in \"${FILE}\""
 	"${scriptdir}/test-port-forwarding.pl" "${FILE}"
 	limactl validate "$FILE"
+fi
+
+if [[ -n ${CHECKS["disk"]} ]]; then
+	if ! limactl disk ls | grep -q "^data\s"; then
+		limactl disk create data
+		defer "limactl disk delete data"
+	fi
 fi
 
 function diagnose() {
@@ -237,10 +248,24 @@ if [[ -n ${CHECKS["vmnet"]} ]]; then
 	# NOTE: we only test the shared interface here, as the bridged interface cannot be used on GHA (and systemd-networkd-wait-online.service will fail)
 fi
 
+if [[ -n ${CHECKS["disk"]} ]]; then
+	INFO "Testing disk is attached"
+	set -x
+	if ! limactl shell "$NAME" lsblk --output NAME,MOUNTPOINT | grep -q "/mnt/lima-data"; then
+		ERROR "Disk is not mounted"
+		exit 1
+	fi
+	set +x
+fi
+
 if [[ -n ${CHECKS["restart"]} ]]; then
 	INFO "Create file in the guest home directory and verify that it still exists after a restart"
 	# shellcheck disable=SC2016
 	limactl shell "$NAME" sh -c 'touch $HOME/sweet-home'
+	if [[ -n ${CHECKS["disk"]} ]]; then
+		INFO "Create file in disk and verify that it still exists when it is reattached"
+		limactl shell "$NAME" sudo sh -c 'touch /mnt/lima-data/sweet-disk'
+	fi
 
 	INFO "Stopping \"$NAME\""
 	limactl stop "$NAME"
@@ -263,6 +288,13 @@ if [[ -n ${CHECKS["restart"]} ]]; then
 	if ! limactl shell "$NAME" sh -c 'test -f $HOME/sweet-home'; then
 		ERROR "Guest home directory does not persist across restarts"
 		exit 1
+	fi
+
+	if [[ -n ${CHECKS["disk"]} ]]; then
+		if ! limactl shell "$NAME" sh -c 'test -f /mnt/lima-data/sweet-disk'; then
+			ERROR "Disk does not persist across restarts"
+			exit 1
+		fi
 	fi
 fi
 
